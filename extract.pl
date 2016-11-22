@@ -11,9 +11,9 @@ use Compress::Raw::Lzma;
 
 use File::Path qw(make_path );
 use File::Basename qw(fileparse);
+use File::HomeDir;
 
 use Getopt::Long qw(:config gnu_getopt);
-use Pod::Usage;
 
 use Term::ProgressBar 2.00;
 
@@ -25,43 +25,94 @@ my $v = 1; # 0 = Quiet, 1 = Normal, 2 = Verbose, 3 = Debug, 4 = Intermediate fil
 
 # There are a huge number of possible config variables, more possible with customisation
 # We only try to do the common ones
-# TODO: Extract these from the tcl file
 my %config_variables = (
-	InstallDir => "InstallDir",
+	Home => File::HomeDir->my_home, # Set by tcl function
 );
 
 my $prefix = "install_dir";
 
-# TODO: pod2usage output is a bit ugly
+my $help = <<HELP;
+Usage: $0 [OPTIONS] FILE
+Extracts installable file from Install Jammer binary installer FILE.
+
+  -v, --verbose          Increase verbosity, more times for more verbose
+      --quiet            Suppress all output including warnings
+      --prefix PATH      Root of the extracted file directory tree
+                         'install_dir' is used if this is not set
+  -s, --set NAME=VALUE   Set installer configuration variables
+      --help             Display this help and exit
+      --version          Display version and licence information and exit
+
+The installer interpolates the variables into the path and file names.
+Most of these are hardcoded into the install program and extracted by this
+script but some may be set interactively by the user. The script will produce
+a warning if any unknown variables are encountered. The --set argument is a
+way of providing this missing information, it can be called multiple times.
+
+The script has five verbosity levels:
+  0  Quiet,   no output is provided
+  1  Normal,  a progress status bar is shown along with warnings
+  2  Verbose, detailed progress information provided such as each filename
+  3  Debug,   dumps the internal script state at various points
+  4  Clutter, intermediate and raw files are dumped to disk
+Levels 3 and 4 will only make sense if working through the source code.
+HELP
+
+my $version = <<VERSION;
+$0 v0.2.0
+
+Copyright (C) 2016 David Tulloh
+ 
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+ 
+Latest version and source code available from
+https://github.com/lod/unpack_install_jammer/
+VERSION
+
+my $usage = <<USAGE;
+Try '$0 --help' for more information.
+USAGE
 
 GetOptions(
-	'verbose|v+'   => \$v,
+	'verbose|v+' => \$v,
 	'quiet'      => sub { $v= 0 },
-	'variable=s' => \%config_variables,
+	'set|s=s'    => \%config_variables,
 	'prefix=s'   => \$prefix,
-	'version'    => sub { pod2usage(-verbose => 99, -sections => "VERSION", -exitval => 0, indent=> 0) },
-	'help|?'     => sub { pod2usage(0) },
-) or pod2usage(2);
+	'version'    => sub { print $version and exit(0) },
+	'help'       => sub { print $help and exit(0) },
+) or print STDERR $usage and exit(2);
 
-pod2usage(2) unless @ARGV == 1;
+unless (@ARGV == 1) {
+	say STDERR "A FILE must be specified.";
+	print STDERR $usage;
+	exit(2);
+}
 
 my $target = pop(@ARGV);
-pod2usage(2) unless -f $target;
-
+unless (-f $target) {
+	say STDERR "FILE must exist and be readable.";
+	print STDERR $usage;
+	exit(2);
+}
 
 dd (@ARGV, {target => $target, verbose => $v, prefix => $prefix}, \%config_variables) if $v > 2;
 
 
 sub get_config_var {
 	my ($k) = @_;
-	unless ($config_variables{$k}) {
+	say "Using variable $k" if $v > 2;
+	unless (exists $config_variables{$k}) {
 		# Warn about missing variables but only once
 		say "WARNING: Missing variable $k" if $v;
 		$config_variables{$k} = $k;
+	} else {
+		# Interpolate variables
+		$config_variables{$k} =~ s/<%(\w+)%>/get_config_var($1)/eg;
 	}
-		return $config_variables{$k};
+	return $config_variables{$k};
 }
-
 
 my $progress = Term::ProgressBar->new({count => 100, silent => $v!=1});
 
@@ -72,6 +123,38 @@ my $progress = Term::ProgressBar->new({count => 100, silent => $v!=1});
 
 open(my $fh, "<:mmap", $target);
 open(my $fh2, "<:mmap", $target);
+
+
+sub normalize_path {
+	# Messing with paths is difficult
+	# Goal: Prevent climbing out of the prefix using a path of ../../ etc.
+	#
+	# To do this properly, handling symlinks, you use Cwd::realpath() or
+	# the like. This requires that the path exists though, to chase down
+	# the links. Useless for us.
+	#
+	# The other way is to manually pop the path chucks as you run into a
+	# .. element. It doesn't handle symlinks but that shouldn't be an
+	# issue for us as any symlinks would have been intentionally placed.
+	# This magic script below does the popping, somehow.
+
+	# This subroutine was stolen from Dancer::FileUtils v1.3202
+	# Available under GPLv1+
+	
+    # this is a revised version of what is described in
+    # http://www.linuxjournal.com/content/normalizing-path-names-bash
+    # by Mitch Frazier
+    my $path     = shift or return;
+    my $seqregex = qr{
+        [^/]*  # anything without a slash
+        /\.\./ # that is accompanied by two dots as such
+    }x;
+
+    $path =~ s{/\./}{/}g;
+    while ( $path =~ s{$seqregex}{} ) {}
+
+    return $path;
+}
 
 
 sub extract_metadata {
@@ -252,24 +335,74 @@ sub parse_tcl_data {
 	return %install_files;
 }
 
-# TODO: Want to make sure paths can't escape, dest_dir ../ etc.
+
+my $info_blocks_re = qr/array \s+ set \s+ info \s*
+	(                   # start of capture group 1
+	\{                  # match an opening angle bracket
+		(?:
+			[^{}]++     # one or more non angle brackets, non backtracking
+				|
+			(?1)        # found < or >, so recurse to capture group 1
+		)*
+	\}                  # match a closing angle bracket
+	)                   # end of capture group 1
+	/x;
+
+sub parse_info_block {
+	my ($tcl_file) = @_;
+
+	my @info_blocks;
+	if (ref($tcl_file)) {
+		@info_blocks = $$tcl_file =~ m/$info_blocks_re/g;
+	} else {
+		@info_blocks = $tcl_file =~ m/$info_blocks_re/g;
+	}
+
+	foreach my $info_block (@info_blocks) {
+		$info_block =~ s/^\s*\{\s* | \s*\}\s*$//xg;
+
+		my %info = $info_block =~ /(\w+) \s+ ( \{[^}]*\} | \S+ )/xg;
+
+		foreach (keys %info) {
+			# Strip leading and tail {} if present
+			$info{$_} =~ s/^\{ (.*) \}$/$1/xg;
+
+			# Add to config variables unless already set
+			$config_variables{$_} //= $info{$_};
+		}
+	}
+}
 
 sub install_directories {
 	my ($install_files) = @_;
 
 	foreach (keys %$install_files) {
 		next unless $install_files->{$_}{type} eq "dir";
-		
-		my $path = $install_files->{$_}{directory};
-		$path =~ s/<%(\w+)%>/get_config_var($1)/eg;
 
-		say "Path: $prefix/$path" if $v > 1;
-		make_path("$prefix/$path");
+		my %meta = %{$install_files->{$_}};
+		dd(%meta) if $v >2;
 		
-		# NOTE: permissions are not set
+		my $path = $meta{directory};
+		$path =~ s/<%(\w+)%>/get_config_var($1)/eg;
+		my $fullpath = "$prefix/$path";
+
+		# Prevent climbing out of prefix using ../ or the like
+		$fullpath = normalize_path($fullpath);
+		die "Path climbing out: $fullpath" unless $fullpath =~ m!^$prefix/!;
+
+		say "Path: $fullpath" if $v > 1;
+		make_path("$fullpath");
+
+
+		utime($meta{mtime}, $meta{mtime}, $fullpath) if $meta{mtime};
+		
 		# The directory permissions are provided as a six digit number: 040755
 		# I have no idea what the first three digits do
-		# Doesn't matter much, the tcl script doesn't honour dir permissions anyway
+		# The tcl script just always sets 777, we do our best
+		if ($meta{permissions}) {
+			my $perms = substr $meta{permissions}, -3;
+			chmod(oct($perms), $fullpath);
+		}
 
 		$progress->update();
 	}
@@ -293,11 +426,17 @@ sub install_files {
 		}
 
 		my $fullname = "$prefix/$path/$meta{name}";
+		$fullname =~ s/<%(\w+)%>/get_config_var($1)/eg;
+
+		# Prevent climbing out of prefix using ../ or the like
+		$fullname = normalize_path($fullname);
+		die "File climbing out: $fullname" unless $fullname =~ m!^$prefix/!;
+
 		say "File: $fullname" if $v > 1;
 		extract_file(\%meta, $fullname);
 
 		utime($meta{mtime}, $meta{mtime}, $fullname) if $meta{mtime};
-		chmod($meta{permissions}, $fullname) if $meta{permissions};
+		chmod(oct($meta{permissions}), $fullname) if $meta{permissions};
 
 		$progress->update();
 	}
@@ -306,7 +445,9 @@ sub install_files {
 sub install_other {
 	my ($install_files) = @_;
 
-	# TODO: Other types, I think links are possible, maybe more
+	# TODO: Other types, links are possible, they could always customise for more :(
+	# Links should be created as symlinks, "exec ln -s $link $dest"
+	# Need to ensure that the destinations don't violate our prefix "jail"
 
 	foreach (keys %$install_files) {
 		my $type = $install_files->{$_}{type};
@@ -370,79 +511,15 @@ foreach (keys %files) {
 	next unless /^\w+\.tcl$/;
 	my $tcl_file = extract_file($files{$_});
 	%install_files = (%install_files, parse_tcl_data(\$tcl_file, \%files));
+	parse_info_block(\$tcl_file);
 }
 
 if ($v > 2) {
+	say_heading "%config_variables";
+	say join " => ", $_, $config_variables{$_} foreach sort keys %config_variables;
+
 	say_heading "%install_files";
 	dd(%install_files);
 }
 
 install(\%install_files);
-
-exit(0);
-
-#TODO: Want the short output different from the synopsis
-
-__END__
-
-=head1 NAME
-
-=head1 SYNOPSIS
-
-extract.pl [options] file
-
-Try './extract.pl --help' for more information.
-
-=head1 OPTIONS
-
-=over 4
-
-=item B<-v, --verbose>
-	
-Increase output verbosity, can be set multiple times
-
-Set once for verbose output, twice for debug
-
-A third level of verbosity will cause intermediate files to be created
-
-=item B<--quiet>
-
-Suppress all output, this includes warnings.
-
-=item B<    --prefix path>
-
-Set a directory prefix to place the extracted files in.
-
-'./install_dir' is used as the default if this path is not set
-
-=item B<    --variable name=val>
-
-The install script includes a bunch of variables which are used to
-dynamically change the file destination paths.
-
-These are configured by the bundler, InstallDir is standard, ShortName has also been seen.
-
-By default we use the variable name as its value. Any unknown variable will be
-warned of to allow proper configuration.
-
-=item B<    --version>
-
-Displays program version and licence information
-
-=item B<-?, --help>
-
-Displays this help
-
-
-=head1 VERSION
-
-extract.pl Alpha 1
-
-Copyright (C) 2016 David Tulloh
-
- License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
- This is free software: you are free to change and redistribute it.
- There is NO WARRANTY, to the extent permitted by law.
-
-Latest version and source code available from
-L<https://github.com/lod/unpack_install_jammer/>
