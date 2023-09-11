@@ -26,7 +26,7 @@ my $v = 1; # 0 = Quiet, 1 = Normal, 2 = Verbose, 3 = Debug, 4 = Intermediate fil
 # There are a huge number of possible config variables, more possible with customisation
 # We only try to do the common ones
 my %config_variables = (
-	Home => File::HomeDir->my_home, # Set by tcl function
+	Home => "home",
 );
 
 my $prefix = "install_dir";
@@ -68,7 +68,7 @@ This is free software: you are free to change and redistribute it.
 There is NO WARRANTY, to the extent permitted by law.
  
 Latest version and source code available from
-https://github.com/lod/unpack_install_jammer/
+https://github.com/lod/unpack-install-jammer/
 VERSION
 
 my $usage = <<USAGE;
@@ -116,13 +116,13 @@ sub get_config_var {
 
 my $progress = Term::ProgressBar->new({count => 100, silent => $v!=1});
 
-# Open two mmap handles into the target.
+# Open two handles into the target.
 # The setup process is fairly slow apparently, so we reuse the handles
 # $fh is for sequential access, searching through the file
 # $fh2 is for binary access, grabbing chunks identified by the sequential scan
 
-open(my $fh, "<:mmap", $target);
-open(my $fh2, "<:mmap", $target);
+open(my $fh, "<:raw", $target);
+open(my $fh2, "<:raw", $target);
 
 
 sub normalize_path {
@@ -223,7 +223,7 @@ sub extract_file {
 	read($fh, my $raw, $meta->{c_size});
 
 	if ($out_filename and $v > 3) {
-		open(my $raw_fh, ">", "$out_filename.raw");
+		open(my $raw_fh, ">:raw", "$out_filename.raw");
 		print $raw_fh $raw;
 		close $raw_fh;
 	}
@@ -263,7 +263,7 @@ sub extract_file {
 	}
 
 	if ($out_filename) {
-		open(my $out_fh, ">", $out_filename);
+		open(my $out_fh, ">:raw", $out_filename);
 		print $out_fh $output;
 	} else {
 		return $output;
@@ -276,7 +276,7 @@ sub parse_tcl_data {
 	# $tcl_file can be a scalar string or a reference to a scalar string
 	# The second is preferred as the string will probably be rather large
 
-	open(my $tcl_fh, '<', ref($tcl_file) ? $tcl_file : \$tcl_file) or die $!;
+	open(my $tcl_fh, '<:raw', ref($tcl_file) ? $tcl_file : \$tcl_file) or die $!;
 	my %install_files;
 
 	say_heading "Parsing tcl file" if $v > 2;
