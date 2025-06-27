@@ -294,6 +294,12 @@ sub parse_tcl_data {
 		# id has a leading double colon, ditch it
 		$id =~ s/^:://;
 
+		# Fields could be quoted, by {}, if it is there remove it
+		# This is especially important for files and directories
+		for (values %new_elems) {
+		    s/^{|}$//g if /^{.*}$/;
+		}
+
 		dd($_, $id, %new_elems) if $v > 2;
 		
 		# Set every possible elem value rather than what is provided
