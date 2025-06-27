@@ -59,7 +59,7 @@ Levels 3 and 4 will only make sense if working through the source code.
 HELP
 
 my $version = <<VERSION;
-$0 v0.2.0
+$0 v0.3.0
 
 Copyright (C) 2016 David Tulloh
  
