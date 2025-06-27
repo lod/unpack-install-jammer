@@ -26,7 +26,7 @@ my $v = 1; # 0 = Quiet, 1 = Normal, 2 = Verbose, 3 = Debug, 4 = Intermediate fil
 # There are a huge number of possible config variables, more possible with customisation
 # We only try to do the common ones
 my %config_variables = (
-	Home => "home",
+	Home => File::HomeDir->my_home // "home", # Set by tcl function
 );
 
 my $prefix = "install_dir";
@@ -116,13 +116,16 @@ sub get_config_var {
 
 my $progress = Term::ProgressBar->new({count => 100, silent => $v!=1});
 
-# Open two handles into the target.
-# The setup process is fairly slow apparently, so we reuse the handles
+# Open two mmap handles into the target.
+# The open process is fairly slow, so we reuse the handles
 # $fh is for sequential access, searching through the file
 # $fh2 is for binary access, grabbing chunks identified by the sequential scan
 
-open(my $fh, "<:raw", $target);
-open(my $fh2, "<:raw", $target);
+# mmap isn't supported by Windows, but we want it when we can use it
+my $cp_mmap = $^O eq 'MSWin32' ? "raw" : "mmap";
+
+open(my $fh, "<:$cp_mmap", $target);
+open(my $fh2, "<:$cp_mmap", $target);
 
 
 sub normalize_path {
